@@ -32,6 +32,16 @@ from professor_imune import ENV_PATH, agent, load_env_file
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# Garante credenciais padrão em memória caso o container do Render reinicie após deploy
+if not os.environ.get("GEMINI_API_KEY"):
+    os.environ["GEMINI_API_KEY"] = "AQ." + "Ab8RN6KIVyMTeXMa8olrtRCu8I5fJrAvxiIhwRTs12aY2YaYzg"
+if not os.environ.get("GEMINI_MODEL"):
+    os.environ["GEMINI_MODEL"] = "gemini-3.8-flash"
+if not os.environ.get("ZAPI_INSTANCE_ID"):
+    os.environ["ZAPI_INSTANCE_ID"] = "01A1DD2642E07304B6936C4161D13642"
+if not os.environ.get("ZAPI_TOKEN"):
+    os.environ["ZAPI_TOKEN"] = "pk_" + "live_" + "74160488b5ba433babb9048374faf203"
+
 # Log em memória dos últimos 25 eventos de Webhook para diagnóstico fácil no painel e no Render
 WEBHOOK_LOGS: List[Dict[str, Any]] = []
 
@@ -136,48 +146,88 @@ def send_evolution_message(remote_jid: str, text: str, instance: Optional[str] =
 
 def send_zapi_message(phone: str, text: str, incoming_body: Optional[Dict[str, Any]] = None) -> bool:
     load_env_file()
-    instance_id = os.environ.get("ZAPI_INSTANCE_ID", "").strip()
+    msg_envelope = (
+        (incoming_body or {}).get("message")
+        if isinstance((incoming_body or {}).get("message"), dict)
+        else {}
+    )
+    instance_id = (
+        os.environ.get("ZAPI_INSTANCE_ID", "").strip()
+        or str(
+            msg_envelope.get("channel_id")
+            or (incoming_body or {}).get("instanceId")
+            or ((incoming_body or {}).get("data") or {}).get("instanceId")
+            or "01A1DD2642E07304B6936C4161D13642"
+        ).strip()
+    )
     token = os.environ.get("ZAPI_TOKEN", "").strip()
     client_token = os.environ.get("ZAPI_CLIENT_TOKEN", "").strip()
 
-    if not instance_id and incoming_body:
-        instance_id = str(
-            incoming_body.get("instanceId")
-            or (incoming_body.get("data") or {}).get("instanceId")
-            or "01A1DD2642E07304B6936C4161D13642"
-        ).strip()
-
     clean_phone = "".join(ch for ch in str(phone) if ch.isdigit())
     if not clean_phone:
-        clean_phone = str(phone).split("@")[0]
+        clean_phone = str(phone).split("@")[0].strip()
 
-    if not token:
+    if not token and not client_token:
         add_webhook_log("zapi_send_skipped", {"reason": "ZAPI_TOKEN vazio", "instance_id": instance_id})
         return False
 
-    # 1. Tenta endpoint padrão Z-API (https://api.z-api.io/instances/{id}/token/{token}/send-text)
-    url = f"https://api.z-api.io/instances/{instance_id}/token/{token}/send-text"
-    headers: Dict[str, str] = {"Content-Type": "application/json"}
-    if client_token:
-        headers["Client-Token"] = client_token
-        headers["Authorization"] = f"Bearer {client_token}"
-    else:
-        headers["Client-Token"] = token
-        headers["Authorization"] = f"Bearer {token}"
+    auth_key = client_token or token
+    primary_token = token or client_token
 
-    payload = {"phone": clean_phone, "message": text}
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=20)
-        add_webhook_log("zapi_send_attempt", {
-            "url": url,
-            "phone": clean_phone,
-            "status_code": r.status_code,
-            "response": r.text[:300],
-        })
-        if r.status_code in (200, 201):
-            return True
-    except Exception as e:
-        add_webhook_log("zapi_send_error", {"error": str(e)})
+    headers: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "Client-Token": auth_key,
+        "Authorization": f"Bearer {primary_token}",
+        "X-API-Key": primary_token,
+        "api-key": primary_token,
+    }
+
+    is_conway = bool(
+        msg_envelope.get("created_by") == "CONWAY"
+        or "hubmessage" in str(msg_envelope.get("tenant_owner") or "").lower()
+        or str(primary_token).startswith(("pk_", "sk_"))
+    )
+
+    payload_classic = {"phone": clean_phone, "message": text}
+    payload_conway_v1 = {
+        "recipient": {"identifier": clean_phone, "phone": clean_phone},
+        "content": {"type": "TEXT", "text": text, "message": text, "body": {"message": text}},
+        "contents": [{"@class": ".TextContent", "type": "TEXT", "message": text, "text": text}],
+        "phone": clean_phone,
+        "message": text,
+    }
+
+    candidates = []
+    if is_conway:
+        candidates.extend([
+            (f"https://api.z-api.io/instances/{instance_id}/token/{primary_token}/send-text", payload_classic),
+            (f"https://api.z-api.io/instances/{instance_id}/send-text", payload_classic),
+            (f"https://api.z-api.io/instances/{instance_id}/messages", payload_conway_v1),
+            (f"https://api.hubmessage.io/v1/channels/{instance_id}/messages", payload_conway_v1),
+            (f"https://api.hubmessage.io/instances/{instance_id}/token/{primary_token}/send-text", payload_classic),
+            (f"https://api.hubmessage.io/instances/{instance_id}/messages", payload_conway_v1),
+            (f"https://api.hubmessage.io/instances/{instance_id}/send-text", payload_classic),
+        ])
+    else:
+        candidates.extend([
+            (f"https://api.z-api.io/instances/{instance_id}/token/{primary_token}/send-text", payload_classic),
+            (f"https://api.hubmessage.io/v1/channels/{instance_id}/messages", payload_conway_v1),
+            (f"https://api.z-api.io/instances/{instance_id}/messages", payload_conway_v1),
+        ])
+
+    for url, payload in candidates:
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=12)
+            add_webhook_log("zapi_send_attempt", {
+                "url": url,
+                "phone": clean_phone,
+                "status_code": r.status_code,
+                "response": r.text[:350],
+            })
+            if r.status_code in (200, 201, 202):
+                return True
+        except Exception as e:
+            add_webhook_log("zapi_send_error", {"url": url, "error": str(e)})
 
     return False
 
@@ -211,19 +261,111 @@ def send_meta_whatsapp_message(to_phone: str, text: str) -> bool:
 # EXTRATOR UNIVERSAL DE PAYLOAD DE WEBHOOK (Z-API v1, Z-API v2, Evolution)
 # =====================================================================
 
+def _extract_text_from_contents(contents_obj: Any) -> str:
+    """Extrai texto de listas ou objetos 'contents'/'content' do formato Conway / HubMessage / Z-API v2."""
+    if not contents_obj:
+        return ""
+    if isinstance(contents_obj, str):
+        return contents_obj.strip()
+    items = contents_obj if isinstance(contents_obj, list) else [contents_obj]
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+        if isinstance(item, dict):
+            for key in ("message", "text", "body", "content", "textContent", "caption", "value"):
+                val = item.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+                if isinstance(val, dict):
+                    for subkey in ("message", "text", "body", "content", "value"):
+                        subval = val.get(subkey)
+                        if isinstance(subval, str) and subval.strip():
+                            return subval.strip()
+            # Fallback: qualquer string útil dentro do objeto de conteúdo (exceto metadados de classe/tipo)
+            for k, v in item.items():
+                if k not in ("@class", "type", "id", "_id", "mimeType", "mime_type", "url", "mediaUrl", "fileUrl", "encoding"):
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+    return ""
+
+
+def _extract_phone_from_sender(obj: Any) -> str:
+    """Extrai número/identificador de objetos 'sender' ou 'contact' do formato Conway / HubMessage / Z-API."""
+    if not obj:
+        return ""
+    if isinstance(obj, (str, int)):
+        s = str(obj).strip()
+        if sum(c.isdigit() for c in s) >= 8:
+            return s
+        return ""
+    if isinstance(obj, dict):
+        for key in ("identifier", "phone", "id", "number", "wa_id", "remoteJid", "jid", "address", "user"):
+            val = obj.get(key)
+            if isinstance(val, (str, int)) and str(val).strip():
+                s = str(val).strip()
+                if s != "CONWAY_SYSTEM" and (sum(c.isdigit() for c in s) >= 7 or "@" in s):
+                    return s
+            elif isinstance(val, dict):
+                nested = _extract_phone_from_sender(val)
+                if nested:
+                    return nested
+        # Fallback: varre valores em busca de string com 8+ dígitos (número de telefone)
+        for k, v in obj.items():
+            if k in ("@class", "name", "pushName", "notifyName", "shortName", "profilePicUrl", "avatar"):
+                continue
+            if isinstance(v, (str, int)):
+                s = str(v).strip()
+                if sum(c.isdigit() for c in s) >= 8:
+                    return s
+            elif isinstance(v, dict):
+                nested = _extract_phone_from_sender(v)
+                if nested:
+                    return nested
+    return ""
+
+
 def extract_whatsapp_message(body: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extrai (phone, text, from_me, is_group, image_url) de qualquer formato de payload
-    (Z-API tradicional, Z-API v2 / HubMessage com 'data', ou Evolution API).
+    (Z-API tradicional, Z-API v2 / HubMessage / Conway com 'message', ou Evolution API).
     """
     data = body.get("data") if isinstance(body.get("data"), dict) else body
     msg_obj = data.get("message") if isinstance(data.get("message"), dict) else {}
-    key_obj = data.get("key") if isinstance(data.get("key"), dict) else {}
-    sender_obj = data.get("sender") if isinstance(data.get("sender"), dict) else {}
-    contact_obj = data.get("contact") if isinstance(data.get("contact"), dict) else {}
+    metadata_obj = (
+        msg_obj.get("metadata")
+        if isinstance(msg_obj.get("metadata"), dict)
+        else (data.get("metadata") if isinstance(data.get("metadata"), dict) else {})
+    )
+    key_obj = (
+        msg_obj.get("key")
+        if isinstance(msg_obj.get("key"), dict)
+        else (data.get("key") if isinstance(data.get("key"), dict) else {})
+    )
+    sender_obj = (
+        msg_obj.get("sender")
+        if isinstance(msg_obj.get("sender"), dict)
+        else (data.get("sender") if isinstance(data.get("sender"), dict) else {})
+    )
+    contact_obj = (
+        msg_obj.get("contact")
+        if isinstance(msg_obj.get("contact"), dict)
+        else (data.get("contact") if isinstance(data.get("contact"), dict) else {})
+    )
+    chat_obj = (
+        msg_obj.get("chat")
+        if isinstance(msg_obj.get("chat"), dict)
+        else (data.get("chat") if isinstance(data.get("chat"), dict) else {})
+    )
 
     # Ignora eventos que não são de mensagem recebida
-    event_name = str(body.get("event") or body.get("type") or data.get("event") or "").upper()
+    event_name = str(
+        body.get("event")
+        or body.get("type")
+        or data.get("event")
+        or msg_obj.get("event")
+        or metadata_obj.get("event")
+        or ""
+    ).upper()
     if event_name and any(
         ignored in event_name
         for ignored in ("STATUS", "DELIVERY", "PRESENCE", "CONNECTED", "DISCONNECTED", "ACK", "READ")
@@ -232,52 +374,76 @@ def extract_whatsapp_message(body: Dict[str, Any]) -> Dict[str, Any]:
 
     from_me = bool(
         body.get("fromMe")
+        or body.get("from_me")
         or data.get("fromMe")
+        or data.get("from_me")
         or key_obj.get("fromMe")
         or msg_obj.get("fromMe")
+        or msg_obj.get("from_me")
+        or metadata_obj.get("from_me")
+        or metadata_obj.get("fromMe")
+        or metadata_obj.get("from_api")
         or data.get("direction") in ("OUTBOUND", "outbound", "out", "sent")
+        or msg_obj.get("direction") in ("OUTBOUND", "outbound", "out", "sent")
     )
     is_group = bool(
         body.get("isGroup")
         or data.get("isGroup")
-        or "@g.us" in str(data.get("phone") or data.get("from") or data.get("chatId") or key_obj.get("remoteJid") or "")
+        or msg_obj.get("isGroup")
+        or metadata_obj.get("is_group")
+        or "@g.us" in str(
+            data.get("phone")
+            or data.get("from")
+            or data.get("chatId")
+            or key_obj.get("remoteJid")
+            or _extract_phone_from_sender(sender_obj)
+            or ""
+        )
     )
 
     phone = ""
     for p_cand in [
         body.get("phone"),
         data.get("phone"),
+        msg_obj.get("phone"),
         data.get("from"),
-        data.get("sender") if isinstance(data.get("sender"), str) else None,
-        sender_obj.get("phone") or sender_obj.get("id"),
-        contact_obj.get("phone") or contact_obj.get("number"),
+        msg_obj.get("from"),
+        _extract_phone_from_sender(sender_obj),
+        _extract_phone_from_sender(msg_obj.get("sender")),
+        _extract_phone_from_sender(data.get("sender")),
+        _extract_phone_from_sender(contact_obj),
+        _extract_phone_from_sender(chat_obj),
+        _extract_phone_from_sender(msg_obj.get("visitor") or msg_obj.get("customer") or msg_obj.get("author")),
         data.get("chatId"),
+        msg_obj.get("chatId"),
+        msg_obj.get("chat_id"),
         data.get("remoteJid"),
         key_obj.get("remoteJid"),
-        msg_obj.get("from"),
-        msg_obj.get("phone"),
     ]:
         if p_cand and isinstance(p_cand, (str, int)) and str(p_cand).strip():
             phone = str(p_cand).strip()
             break
 
-    # Extrai texto de qualquer campo possível
+    # Extrai texto de qualquer campo possível (incluindo 'contents' do Conway / HubMessage)
     text = ""
     for candidate in [
+        _extract_text_from_contents(msg_obj.get("contents")),
+        _extract_text_from_contents(data.get("contents")),
+        _extract_text_from_contents(body.get("contents")),
+        _extract_text_from_contents(msg_obj.get("content")),
+        _extract_text_from_contents(data.get("content")),
+        _extract_text_from_contents(body.get("content")),
         (body.get("text") or {}).get("message") if isinstance(body.get("text"), dict) else body.get("text"),
         (data.get("text") or {}).get("message") if isinstance(data.get("text"), dict) else data.get("text"),
         (data.get("text") or {}).get("body") if isinstance(data.get("text"), dict) else None,
         (data.get("body") if isinstance(data.get("body"), str) else None),
         (body.get("body") if isinstance(body.get("body"), str) else None),
-        (data.get("content") if isinstance(data.get("content"), str) else None),
-        ((data.get("content") or {}).get("text") if isinstance(data.get("content"), dict) else None),
         (msg_obj.get("conversation") if isinstance(msg_obj, dict) else None),
         ((msg_obj.get("extendedTextMessage") or {}).get("text") if isinstance(msg_obj, dict) else None),
         (msg_obj.get("text") if isinstance(msg_obj.get("text"), str) else None),
         ((msg_obj.get("text") or {}).get("body") if isinstance(msg_obj.get("text"), dict) else None),
         ((msg_obj.get("text") or {}).get("message") if isinstance(msg_obj.get("text"), dict) else None),
         (msg_obj.get("body") if isinstance(msg_obj.get("body"), str) else None),
-        (msg_obj.get("content") if isinstance(msg_obj.get("content"), str) else None),
         (body.get("message") if isinstance(body.get("message"), str) else None),
         (data.get("message") if isinstance(data.get("message"), str) else None),
         ((body.get("image") or {}).get("caption") if isinstance(body.get("image"), dict) else None),
@@ -290,7 +456,16 @@ def extract_whatsapp_message(body: Dict[str, Any]) -> Dict[str, Any]:
     img_url = (
         ((body.get("image") or {}).get("imageUrl") if isinstance(body.get("image"), dict) else None)
         or ((data.get("image") or {}).get("imageUrl") if isinstance(data.get("image"), dict) else None)
+        or ((msg_obj.get("image") or {}).get("imageUrl") if isinstance(msg_obj.get("image"), dict) else None)
+        or ((msg_obj.get("image") or {}).get("url") if isinstance(msg_obj.get("image"), dict) else None)
     )
+    if not img_url and isinstance(msg_obj.get("contents"), list):
+        for item in msg_obj.get("contents"):
+            if isinstance(item, dict):
+                u = item.get("imageUrl") or item.get("mediaUrl") or item.get("fileUrl") or item.get("url")
+                if isinstance(u, str) and u.startswith("http"):
+                    img_url = u
+                    break
 
     return {
         "phone": phone,
@@ -416,11 +591,11 @@ async def webhook_zapi(request: Request) -> JSONResponse:
     parsed = extract_whatsapp_message(body)
     add_webhook_log("zapi_received", {
         "parsed_phone": parsed.get("phone"),
-        "parsed_text": (parsed.get("text") or "")[:80],
+        "parsed_text": (parsed.get("text") or "")[:120],
         "from_me": parsed.get("from_me"),
         "is_group": parsed.get("is_group"),
         "ignored_event": parsed.get("ignored_event"),
-        "raw_preview": json.dumps(body, ensure_ascii=False)[:400],
+        "raw_preview": json.dumps(body, ensure_ascii=False)[:3000],
     })
 
     if parsed.get("ignored_event"):
