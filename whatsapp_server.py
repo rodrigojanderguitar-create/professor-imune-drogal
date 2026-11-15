@@ -548,7 +548,10 @@ async def health_check(request: Request) -> JSONResponse:
 
 
 async def api_logs(request: Request) -> JSONResponse:
-    return JSONResponse({"logs": WEBHOOK_LOGS})
+    return JSONResponse({
+        "token_usage": agent.get_token_summary(),
+        "logs": WEBHOOK_LOGS,
+    })
 
 
 async def api_status(request: Request) -> JSONResponse:
@@ -563,6 +566,7 @@ async def api_status(request: Request) -> JSONResponse:
         "zapi_configured": zapi_ready,
         "evolution_configured": evo_ready,
         "knowledge_base": kb.stats(),
+        "token_usage": agent.get_token_summary(),
         "recent_webhooks": len(WEBHOOK_LOGS),
     })
 
@@ -622,6 +626,7 @@ async def api_chat(request: Request) -> JSONResponse:
         "sources": sources,
         "session_id": session_id,
         "gemini_active": bool(agent.get_api_key(api_key)),
+        "token_usage": agent.get_token_summary(),
     })
 
 
@@ -691,7 +696,12 @@ async def webhook_zapi(request: Request) -> JSONResponse:
         session_id=f"zapi:{phone}",
         image_bytes=image_bytes,
     )
-    add_webhook_log("agent_reply_ready", {"phone": phone, "reply_preview": reply[:120]})
+    add_webhook_log("agent_reply_ready", {
+        "phone": phone,
+        "reply_preview": reply[:120],
+        "token_usage": agent.token_stats.get("last_call"),
+        "daily_total_tokens": agent.token_stats.get("daily_total_tokens"),
+    })
     sent = send_zapi_message(phone=phone, text=reply, incoming_body=body)
     return JSONResponse({"status": "processed", "sent_to_zapi": sent, "reply": reply})
 
@@ -884,16 +894,26 @@ SIMULATOR_HTML = """<!DOCTYPE html>
       <div class="form-group">
         <label>Modelo Gemini</label>
         <select id="modelSelect">
-          <option value="gemini-3.8-flash">Gemini 3.8 Flash (Recomendado / Padrão)</option>
-          <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-          <option value="gemini-2.5-pro">Gemini Pro (Raciocínio Clínico Profundo)</option>
+          <option value="gemini-3.6-flash">Gemini 3.6 Flash (Rápido / Econômico)</option>
+          <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+          <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Ultra Econômico)</option>
         </select>
       </div>
       <button class="btn" onclick="saveConfig()">Salvar Configuração</button>
     </div>
 
     <div class="section">
-      <h3>📱 2. Conexão WhatsApp (QR Code)</h3>
+      <h3>🛡️ 2. Uso de Tokens (Modo Zero Acréscimos)</h3>
+      <div class="webhook-box" id="tokenUsageBox" style="background:#f0fdf4; border-color:#bbf7d0;">
+        <div><strong>Proteção:</strong> <span style="color:#15803d; font-weight:700;">Ativa (Sem custos extras)</span></div>
+        <div style="margin-top:4px;"><strong>Última msg:</strong> <span id="tokLast">0 tokens</span></div>
+        <div><strong>Hoje:</strong> <span id="tokDaily">0 / 500.000 tokens</span></div>
+        <div><strong>Total Acumulado:</strong> <span id="tokTotal">66.500 tokens</span></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>📱 3. Conexão WhatsApp (QR Code)</h3>
       <div class="webhook-box" style="margin-bottom:8px;">
         <strong>URL do Webhook na Z-API (Ao Receber):</strong>
         <code id="zapiWebhookUrl">POST .../webhook/zapi</code>
@@ -968,6 +988,18 @@ Como posso apoiar você hoje na sala de vacinação?</div>
     document.getElementById('zapiWebhookUrl').textContent = window.location.origin + '/webhook/zapi';
     document.getElementById('evoWebhookUrl').textContent = window.location.origin + '/webhook/evolution';
 
+    function renderTokenBox(tu) {
+      if (!tu) return;
+      const last = tu.last_call || {};
+      const fmt = (n) => Number(n || 0).toLocaleString('pt-BR');
+      document.getElementById('tokLast').textContent =
+        fmt(last.total_tokens) + ' tok (E: ' + fmt(last.prompt_tokens) + ' | S: ' + fmt(last.output_tokens) + ' | Pensamento: ' + fmt(last.thinking_tokens) + ')';
+      document.getElementById('tokDaily').textContent =
+        fmt(tu.daily_total_tokens) + ' / ' + fmt(tu.max_daily_tokens_cap || 500000) + ' tok (' + fmt(tu.daily_requests) + ' msgs)';
+      document.getElementById('tokTotal').textContent =
+        fmt(tu.total_tokens) + ' tok (' + fmt(tu.total_requests) + ' chamadas)';
+    }
+
     async function loadStatus() {
       try {
         const r = await fetch('/api/status');
@@ -988,7 +1020,8 @@ Como posso apoiar você hoje na sala de vacinação?</div>
           waBadge.className = 'badge ok';
           waBadge.textContent = 'Evolution API Conectada';
         }
-        document.getElementById('modelSelect').value = d.gemini_model || 'gemini-3.8-flash';
+        document.getElementById('modelSelect').value = d.gemini_model || 'gemini-3.6-flash';
+        if (d.token_usage) renderTokenBox(d.token_usage);
       } catch (e) {}
     }
 
@@ -1071,6 +1104,7 @@ Como posso apoiar você hoje na sala de vacinação?</div>
         const data = await r.json();
         loadingDiv.remove();
         appendMessage('bot', data.reply);
+        if (data.token_usage) renderTokenBox(data.token_usage);
       } catch (e) {
         loadingDiv.textContent = '❌ Erro ao processar mensagem: ' + e;
       } finally {
