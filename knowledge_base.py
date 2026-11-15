@@ -123,6 +123,44 @@ PROTOCOLOS_OPERACIONAIS: List[Dict[str, str]] = [
             "   • Passo 4: Registrar no ClinicarX e notificar no VigiMed (Anvisa) / e-SUS Notifica."
         ),
     },
+    {
+        "id": "PROTO-CALENDARIO-ADULTO-SBIM-DROGAL",
+        "source": "Guia de Bolso SBIm 2026 (Calendário Adulto 20 a 59 anos) & Treinamento Rede Drogal",
+        "title": "Calendário Adulto (20 a 59 anos) Homem/Mulher e Conduta para Paciente Sem Cartão de Vacina (Sem Comprovação Vacinal)",
+        "content": (
+            "CALENDÁRIO VACINAL DO ADULTO (20 A 59 ANOS) E CONDUTA SEM CARTÃO DE VACINA (GUIA SBIm 2026 & REDE DROGAL):\n"
+            "REGRA DE OURO (PACIENTE SEM CARTÃO / SEM COMPROVAÇÃO VACINAL): Pela diretriz SBIm e PNI, adulto sem carteira de vacinação ou sem registro no Meu SUS Digital/ClinicarX é considerado NÃO VACINADO. Deve-se iniciar os esquemas vacinais do zero (não há risco em revacinar quem já teve doses prévias na infância).\n\n"
+            "VACINAS PRIORITÁRIAS DE ROTINA PARA ADULTO (20 A 59 ANOS, EX.: 30, 35, 40 ANOS, SEM COMORBIDADES):\n"
+            "1. dTpa (Refortrix® / Boostrix®) ou dTpa-VIP (Refortrix® IPV) — Tríplice Bacteriana Acelular do Adulto:\n"
+            "   • Esquema COM comprovação de 3 doses de dT/DTP: 1 dose de dTpa agora e reforço a cada 10 anos.\n"
+            "   • Esquema SEM cartão / SEM comprovação vacinal: 3 doses no esquema 0 - 2 - 4 a 8 meses, sendo a 1ª dose obrigatoriamente com dTpa (Refortrix®) na Drogal e as outras duas com dT (ou dTpa). Via IM no deltoide (0,5 mL). Sem necessidade de receita.\n"
+            "2. Hepatite B (Engerix® B 20 mcg/1,0 mL) ou Hepatite A+B Combinada (Twinrix®):\n"
+            "   • Sem comprovação vacinal: 3 doses no esquema 0 - 1 - 6 meses (via IM no deltoide, 1,0 mL para adulto). Se desejar proteger Hepatite A e B juntas na mesma picada: usar Twinrix® (0 - 1 - 6 meses, IM, sem receita).\n"
+            "   • Hepatite A isolada (Vaqta® / Havrix® / Avaxim®): 2 doses no esquema 0 - 6 meses (IM no deltoide, sem receita).\n"
+            "3. Tríplice Viral — Sarampo, Caxumba e Rubéola (M-M-R II®):\n"
+            "   • Adultos até 29 anos: 2 doses na vida. Adultos de 30 a 59 anos: 1 dose (ou 2 doses pela SBIm/surtos/profissionais de saúde, com intervalo mínimo de 30 dias). Sem cartão de vacina: aplicar M-M-R II® (0,5 mL, via Subcutânea, sem receita). Contraindicada em gestantes e imunossuprimidos graves.\n"
+            "4. Dengue Atenuada (Qdenga® — 4 a 60 anos):\n"
+            "   • Indicada para adultos (soropositivos ou soronegativos para dengue): 2 doses com intervalo de 3 meses (0 e 3 meses), 0,5 mL via Subcutânea (SC), sem receita.\n"
+            "   • ATENÇÃO CRÍTICA DROGAL: A Qdenga® NÃO pode ser aplicada no mesmo dia com nenhuma outra vacina! Respeitar intervalo mínimo de 24 horas para vacinas inativadas (ex.: dTpa, Hepatite B, Gripe, HPV) e 30 dias para outras vacinas atenuadas (ex.: Tríplice Viral, Febre Amarela, Varicela).\n"
+            "5. Influenza Quadrivalente (Influvac Tetra®):\n"
+            "   • Dose única anual (0,5 mL, via IM no deltoide, sem receita). Pode ser aplicada no mesmo dia com dTpa, Hepatite B, Tríplice Viral e HPV.\n"
+            "6. HPV Nonavalente (Gardasil 9® — 9 a 45 anos):\n"
+            "   • Recomendada para homens e mulheres adultos (inclusive 35 anos): 3 doses no esquema 0 - 2 - 6 meses (0,5 mL, via IM no deltoide, sem receita até 45 anos).\n"
+            "7. Febre Amarela (Stamaril®):\n"
+            "   • Sem comprovação vacinal: Dose única (0,5 mL, via Subcutânea, sem receita), ou 2ª dose após 10 anos conforme recomendação SBIm.\n"
+            "   • Atenção: Pode ser feita no mesmo dia que a Tríplice Viral (M-M-R II®) em adultos, OU com intervalo mínimo de 30 dias entre elas. Com a Qdenga®, exige 30 dias de intervalo.\n"
+            "8. Meningocócica ACWY (Menveo® / Nimenrix®) e Meningocócica B (Bexsero®):\n"
+            "   • Menveo®/Nimenrix®: dose única (0,5 mL IM, sem receita).\n"
+            "   • Bexsero®: 2 doses com intervalo de 30 a 60 dias (0,5 mL IM; prescrição farmacêutica/médica).\n"
+            "9. Varicela (Varivax® / Varilrix®):\n"
+            "   • Para adultos sem histórico de catapora e sem cartão: 2 doses com intervalo de 1 a 2 meses (0,5 mL SC, sem receita).\n"
+            "10. Herpes Zóster Inativada (Shingrix®):\n"
+            "   • Rotina a partir de 50 anos (sem receita) ou a partir de 18 anos para imunocomprometidos/risco aumentado (com receita médica abaixo de 50 anos): 2 doses (0 e 2 meses, 0,5 mL IM).\n\n"
+            "SUGESTÃO PRÁTICA DE CONDUTA NO BALCÃO HOJE (ADULTO DE 35 ANOS SEM CARTÃO E SEM VACINAS RECENTES):\n"
+            "• Opção A (Combo Proteção Imediata no mesmo dia): Aplicar hoje no mesmo atendimento dTpa (Refortrix®), Hepatite A+B (Twinrix® ou Engerix® B), Influenza (Influvac Tetra®), HPV9 (Gardasil 9®) e Tríplice Viral (M-M-R II®) — todas compatíveis no mesmo dia! E agendar a Qdenga® (Dengue) para 30 dias depois (por causa da Tríplice Viral atenuada).\n"
+            "• Opção B (Prioridade Dengue hoje): Aplicar a 1ª dose da Qdenga® hoje isolada, e agendar as vacinas inativadas (dTpa, Hepatite A+B, Gripe, HPV9) para 24 a 48 horas depois, deixando a Tríplice Viral/Febre Amarela para 30 dias após a Qdenga®."
+        ),
+    },
 ]
 
 SINONIMOS_VACINAS = {
@@ -321,9 +359,28 @@ class KnowledgeBase:
         scored: List[tuple[float, Dict[str, Any]]] = []
         norm_query = normalize_text(query)
 
-        # Detecta busca por idade específica em meses (ex: "2 meses", "bebe de 4 meses")
+        # Detecta faixa etária / perfil do paciente na consulta
         age_months_match = re.search(r"\b(\d+)\s*mes(?:es)?\b", norm_query)
-        is_gestante = any(w in norm_query for w in ["gestante", "gravida", "gravidez", "gestacao"])
+        age_years_matches = [int(m) for m in re.findall(r"\b(\d+)\s*anos?\b", norm_query)]
+        is_gestante = any(w in norm_query for w in ["gestante", "gravida", "gravidez", "gestacao", "pre natal", "pre-natal"])
+        is_crianca = (
+            bool(age_months_match)
+            or any(w in norm_query for w in ["bebe", "crianca", "recem nascido", "recem-nascido", "lactente", "pediatrico"])
+            or any(0 <= y <= 10 for y in age_years_matches)
+        )
+        is_adolescente = (
+            any(w in norm_query for w in ["adolescente", "jovem"])
+            or any(11 <= y <= 19 for y in age_years_matches)
+        )
+        is_adulto = (
+            any(w in norm_query for w in ["adulto", "adulta", "homem", "mulher"])
+            or any(20 <= y <= 59 for y in age_years_matches)
+        )
+        is_idoso = (
+            any(w in norm_query for w in ["idoso", "idosa", "terceira idade"])
+            or any(y >= 60 for y in age_years_matches)
+        )
+        asks_vsr = any(w in norm_query for w in ["vsr", "rsv", "sincicial", "abrysvo", "arexvy", "bronquiolite"])
 
         for doc in self.documents:
             tokens = doc["_tokens"]
@@ -334,6 +391,9 @@ class KnowledgeBase:
                 tf_map[t] = tf_map.get(t, 0) + 1
 
             for qt in q_tokens:
+                # Evita que o número de anos (ex.: "35" em "35 anos") pontue pelo número da página ("Pág. 35")
+                if qt.isdigit() and int(qt) in age_years_matches and doc.get("type") == "pdf" and doc.get("num") == int(qt):
+                    continue
                 tf = tf_map.get(qt, 0)
                 if tf == 0:
                     continue
@@ -342,19 +402,52 @@ class KnowledgeBase:
                 denom = tf + k1 * (1.0 - b + b * (dl / self.avg_dl))
                 score += idf * ((tf * (k1 + 1.0)) / denom)
 
-            title_norm = normalize_text(doc["title"])
+            # Remove "Pág. X" e "Slide X" antes de pontuar match no título para não confundir idade com página
+            raw_title_clean = re.sub(r"p[aá]g\.\s*\d+|slide\s*\d+", "", doc["title"], flags=re.IGNORECASE)
+            title_norm = normalize_text(raw_title_clean)
             for qt in set(tokenize(query, remove_stopwords=True)):
-                if len(qt) >= 3 and qt in title_norm:
+                if len(qt) >= 3 and not qt.isdigit() and qt in title_norm:
                     score += 4.0
+
+            doc_norm = doc["_norm_text"]
 
             # Bônus se for exatamente a página de rotina da idade em meses (ex.: "rotina de 2 meses")
             if age_months_match and not is_gestante:
                 m_num = age_months_match.group(1)
-                if f"rotina de {m_num} meses" in doc["_norm_text"] or f"{m_num} meses" in title_norm:
+                if f"rotina de {m_num} meses" in doc_norm or f"{m_num} meses" in title_norm:
                     score += 12.0
 
-            if is_gestante and "calendario gestante" in doc["_norm_text"]:
-                score += 8.0
+            if is_gestante:
+                if "calendario gestante" in doc_norm:
+                    score += 10.0
+                elif "calendario crianca" in doc_norm or "calendario idoso" in doc_norm:
+                    score -= 6.0
+
+            if is_adulto and not is_gestante and not is_crianca:
+                if doc["id"] == "PROTO-CALENDARIO-ADULTO-SBIM-DROGAL":
+                    score += 18.0
+                elif "calendario adulto" in doc_norm:
+                    score += 8.0
+                    if "nao recomendada como rotina" in doc_norm and not asks_vsr:
+                        score -= 10.0
+                elif "calendario crianca" in doc_norm or "uso pediatrico" in doc_norm:
+                    score -= 15.0
+
+            if is_idoso and not is_crianca:
+                if "calendario idoso" in doc_norm:
+                    score += 10.0
+                elif "calendario crianca" in doc_norm or "uso pediatrico" in doc_norm:
+                    score -= 15.0
+
+            if is_adolescente and not is_crianca:
+                if "calendario adolescentes" in doc_norm:
+                    score += 10.0
+                elif "calendario crianca" in doc_norm:
+                    score -= 10.0
+
+            if is_crianca and not is_adulto and not is_idoso and not is_gestante:
+                if "calendario crianca" in doc_norm:
+                    score += 6.0
 
             if doc["type"] in ("pptx", "protocolo") and score > 0:
                 score *= 1.15
@@ -367,14 +460,20 @@ class KnowledgeBase:
             return []
 
         top_score = scored[0][0]
-        min_threshold = top_score * 0.45
+        min_threshold = top_score * 0.40
 
         results: List[Dict[str, Any]] = []
         seen_ids = set()
 
+        if is_adulto and not is_gestante and not is_crianca:
+            proto_adulto = self.doc_by_id.get("PROTO-CALENDARIO-ADULTO-SBIM-DROGAL")
+            if proto_adulto:
+                results.append(proto_adulto)
+                seen_ids.add(proto_adulto["id"])
+
         if any(w in norm_query for w in ["junto", "juntas", "simultanea", "mesmo dia", "concomitante", "intervalo"]):
             proto = self.doc_by_id.get("PROTO-SIMULTANEIDADE-INTERVALOS")
-            if proto:
+            if proto and proto["id"] not in seen_ids:
                 results.append(proto)
                 seen_ids.add(proto["id"])
 
