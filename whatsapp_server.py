@@ -36,7 +36,7 @@ BASE_DIR = Path(__file__).resolve().parent
 if not os.environ.get("GEMINI_API_KEY"):
     os.environ["GEMINI_API_KEY"] = "AQ." + "Ab8RN6KIVyMTeXMa8olrtRCu8I5fJrAvxiIhwRTs12aY2YaYzg"
 if not os.environ.get("GEMINI_MODEL"):
-    os.environ["GEMINI_MODEL"] = "gemini-3.8-flash"
+    os.environ["GEMINI_MODEL"] = "gemini-3.6-flash"
 if not os.environ.get("ZAPI_INSTANCE_ID"):
     os.environ["ZAPI_INSTANCE_ID"] = "01A1DD2642E07304B6936C4161D13642"
 if not os.environ.get("ZAPI_TOKEN"):
