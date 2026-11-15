@@ -323,8 +323,13 @@ def send_meta_whatsapp_message(to_phone: str, text: str) -> bool:
 # EXTRATOR UNIVERSAL DE PAYLOAD DE WEBHOOK (Z-API v1, Z-API v2, Evolution)
 # =====================================================================
 
+# Tempo máximo (em segundos) para aceitar um webhook da Z-API.
+# Bloqueia retentativas antigas da fila da Z-API (que chegavam minutos ou horas depois sem o humano ter mandado mensagem).
+MAX_WEBHOOK_AGE_SECONDS = 90
+
+
 def _extract_text_from_contents(contents_obj: Any) -> str:
-    """Extrai texto de listas ou objetos 'contents'/'content' do formato Conway / HubMessage / Z-API v2."""
+    """Extrai apenas texto real de mensagens humanas em 'contents'/'content' (ignora reações, recibos e IDs)."""
     if not contents_obj:
         return ""
     if isinstance(contents_obj, str):
@@ -334,20 +339,29 @@ def _extract_text_from_contents(contents_obj: Any) -> str:
         if isinstance(item, str) and item.strip():
             return item.strip()
         if isinstance(item, dict):
-            for key in ("message", "text", "body", "content", "textContent", "caption", "value"):
+            item_type = str(item.get("type") or "").upper()
+            item_class = str(item.get("@class") or "")
+            ext_info = item.get("external_information") if isinstance(item.get("external_information"), dict) else {}
+            webhook_type = str(ext_info.get("webhook_type") or "")
+
+            # Ignora estritamente eventos de reação (emoji), recibos de entrega/leitura ou status
+            if (
+                item_type in ("REACTION", "DELIVERYCALLBACK", "READCALLBACK", "PRESENCE", "STATE", "REFERENCED_MESSAGE", "CALL", "SYSTEM")
+                or "Reaction" in item_class
+                or "StateItem" in item_class
+                or (webhook_type and webhook_type != "ReceivedCallback")
+            ):
+                continue
+
+            for key in ("message", "text", "body", "content", "textContent", "caption"):
                 val = item.get(key)
                 if isinstance(val, str) and val.strip():
                     return val.strip()
                 if isinstance(val, dict):
-                    for subkey in ("message", "text", "body", "content", "value"):
+                    for subkey in ("message", "text", "body", "content"):
                         subval = val.get(subkey)
                         if isinstance(subval, str) and subval.strip():
                             return subval.strip()
-            # Fallback: qualquer string útil dentro do objeto de conteúdo (exceto metadados de classe/tipo)
-            for k, v in item.items():
-                if k not in ("@class", "type", "id", "_id", "mimeType", "mime_type", "url", "mediaUrl", "fileUrl", "encoding"):
-                    if isinstance(v, str) and v.strip():
-                        return v.strip()
     return ""
 
 
@@ -430,9 +444,40 @@ def extract_whatsapp_message(body: Dict[str, Any]) -> Dict[str, Any]:
     ).upper()
     if event_name and any(
         ignored in event_name
-        for ignored in ("STATUS", "DELIVERY", "PRESENCE", "CONNECTED", "DISCONNECTED", "ACK", "READ")
+        for ignored in ("STATUS", "DELIVERY", "PRESENCE", "CONNECTED", "DISCONNECTED", "ACK", "READ", "REACTION")
     ) and "RECEIVED" not in event_name:
         return {"ignored_event": event_name}
+
+    # Verifica se os itens de contents são Reação (emoji), DeliveryCallback ou StateItem
+    contents_list = msg_obj.get("contents") or data.get("contents") or body.get("contents")
+    if isinstance(contents_list, list) and contents_list:
+        first_c = contents_list[0] if isinstance(contents_list[0], dict) else {}
+        c_type = str(first_c.get("type") or "").upper()
+        c_class = str(first_c.get("@class") or "")
+        ext_info = first_c.get("external_information") if isinstance(first_c.get("external_information"), dict) else {}
+        w_type = str(ext_info.get("webhook_type") or "")
+        if (
+            c_type in ("REACTION", "DELIVERYCALLBACK", "READCALLBACK", "PRESENCE", "STATE", "REFERENCED_MESSAGE", "CALL", "SYSTEM")
+            or "Reaction" in c_class
+            or "StateItem" in c_class
+            or (w_type and w_type != "ReceivedCallback")
+        ):
+            return {"ignored_event": f"IGNORED_CONTENT:{c_type or c_class or w_type}"}
+
+    # Bloqueia webhooks atrasados / retentativas antigas da fila da Z-API (> 90 segundos)
+    raw_ts = (
+        msg_obj.get("created")
+        or metadata_obj.get("moment")
+        or data.get("momment")
+        or body.get("momment")
+        or data.get("timestamp")
+        or body.get("timestamp")
+    )
+    if isinstance(raw_ts, (int, float)) and raw_ts > 0:
+        msg_ts_sec = float(raw_ts) / 1000.0 if raw_ts > 1e11 else float(raw_ts)
+        age_sec = time.time() - msg_ts_sec
+        if age_sec > MAX_WEBHOOK_AGE_SECONDS:
+            return {"ignored_event": f"STALE_WEBHOOK_RETRY ({int(age_sec)}s old)"}
 
     from_me = bool(
         body.get("fromMe")
@@ -696,6 +741,10 @@ async def webhook_zapi(request: Request) -> JSONResponse:
         session_id=f"zapi:{phone}",
         image_bytes=image_bytes,
     )
+    if not (reply or "").strip():
+        add_webhook_log("agent_silent_ignore", {"phone": phone, "reason": "Emoji/fechamento silencioso sem resposta"})
+        return JSONResponse({"status": "ignored_silent_input"})
+
     add_webhook_log("agent_reply_ready", {
         "phone": phone,
         "reply_preview": reply[:120],
