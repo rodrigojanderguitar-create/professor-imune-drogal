@@ -288,16 +288,13 @@ class ProfessorImuneAgent:
         candidates_to_try = [model]
         for fallback_m in [
             "gemini-3.8-flash",
-            "gemini-3.8-pro",
-            "gemini-3-flash-preview",
             "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gemini-2.0-flash",
         ]:
             if fallback_m not in candidates_to_try:
                 candidates_to_try.append(fallback_m)
 
         tried = set()
+        dead_hosts = set()
         idx = 0
         while idx < len(candidates_to_try):
             m_name = candidates_to_try[idx].replace("models/", "").strip()
@@ -307,17 +304,19 @@ class ProfessorImuneAgent:
             tried.add(m_name)
 
             endpoints = [
-                f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={api_key}"
+                ("generativelanguage", f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={api_key}")
             ]
             if api_key.startswith("AQ."):
                 endpoints.insert(
                     0,
-                    f"https://aiplatform.googleapis.com/v1/publishers/google/models/{m_name}:generateContent?key={api_key}",
+                    ("aiplatform", f"https://aiplatform.googleapis.com/v1/publishers/google/models/{m_name}:generateContent?key={api_key}"),
                 )
 
-            for url in endpoints:
+            for host_tag, url in endpoints:
+                if host_tag in dead_hosts:
+                    continue
                 try:
-                    resp = requests.post(url, json=payload, timeout=35)
+                    resp = requests.post(url, json=payload, timeout=12)
                     if resp.status_code == 200:
                         data = resp.json()
                         cands = data.get("candidates", [])
@@ -327,17 +326,16 @@ class ProfessorImuneAgent:
                             if text_out:
                                 self._working_model_cache = m_name
                                 return text_out
+                    elif resp.status_code in (400, 401, 403):
+                        dead_hosts.add(host_tag)
                     elif resp.status_code == 404:
                         match = re.search(r"use\s+models/([a-zA-Z0-9\.\-_]+)", resp.text)
                         if match:
                             suggested = match.group(1).strip()
                             if suggested not in tried:
                                 candidates_to_try.insert(idx, suggested)
-                        elif len(tried) == 2:
-                            for disc in self._discover_available_models(api_key)[:3]:
-                                if disc not in tried:
-                                    candidates_to_try.append(disc)
                 except Exception:
+                    dead_hosts.add(host_tag)
                     continue
 
         return None
