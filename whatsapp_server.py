@@ -3,19 +3,22 @@
 Servidor Webhook WhatsApp de Produção + Simulador Web Oficial do Agente "Professor Imune" — Rede Drogal.
 
 Suporta nativamente:
-1. Z-API (QR Code)     -> POST /webhook/zapi (Texto + Fotos de carteira/receita)
-2. Evolution API       -> POST /webhook/evolution (Texto + Fotos)
+1. Z-API / HubMessage  -> POST /webhook/zapi (suporta payload GZIP \x1f\x8b + formatos v1 e v2)
+2. Evolution API       -> POST /webhook/evolution
 3. Meta Cloud API      -> GET e POST /webhook/meta
 4. Twilio WhatsApp     -> POST /webhook/twilio
-5. API REST Genérica   -> POST /api/chat (para n8n, Typebot, Make ou sistemas internos Drogal)
-6. Health Check Cloud  -> GET /health (para Render, Railway, Docker)
+5. Diagnóstico ao vivo -> GET /api/logs (mostra os últimos webhooks recebidos e respostas da API)
 """
 
 import base64
+import gzip
 import html
+import json
 import os
+import time
+import zlib
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 import uvicorn
@@ -28,6 +31,50 @@ from knowledge_base import kb
 from professor_imune import ENV_PATH, agent, load_env_file
 
 BASE_DIR = Path(__file__).resolve().parent
+
+# Log em memória dos últimos 25 eventos de Webhook para diagnóstico fácil no painel e no Render
+WEBHOOK_LOGS: List[Dict[str, Any]] = []
+
+
+def add_webhook_log(event_type: str, details: Dict[str, Any]) -> None:
+    entry = {
+        "time": time.strftime("%H:%M:%S"),
+        "type": event_type,
+        **details,
+    }
+    WEBHOOK_LOGS.insert(0, entry)
+    del WEBHOOK_LOGS[25:]
+    print(f"[WEBHOOK LOG] {json.dumps(entry, ensure_ascii=False)}", flush=True)
+
+
+async def parse_request_json(request: Request) -> Dict[str, Any]:
+    """
+    Lê o corpo da requisição suportando descompressão automática de GZIP (\x1f\x8b)
+    ou DEFLATE enviado pela Z-API / gateways de webhook.
+    """
+    raw = await request.body()
+    if not raw:
+        return {}
+
+    # Detecta cabeçalho mágico GZIP (0x1f 0x8b) ou header Content-Encoding: gzip
+    content_encoding = (request.headers.get("content-encoding") or "").lower()
+    if raw[:2] == b"\x1f\x8b" or "gzip" in content_encoding:
+        try:
+            raw = gzip.decompress(raw)
+        except Exception as e:
+            print(f"[GZIP] Aviso ao descomprimir gzip: {e}", flush=True)
+    elif "deflate" in content_encoding:
+        try:
+            raw = zlib.decompress(raw)
+        except Exception:
+            pass
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1", errors="replace")
+
+    return json.loads(text)
 
 
 def update_env_key(key: str, value: str) -> None:
@@ -53,7 +100,6 @@ def update_env_key(key: str, value: str) -> None:
 
 
 def download_image_from_url(url: str) -> Optional[bytes]:
-    """Baixa imagem enviada no WhatsApp (ex.: foto de carteira de vacinação via Z-API)."""
     if not url:
         return None
     try:
@@ -81,30 +127,59 @@ def send_evolution_message(remote_jid: str, text: str, instance: Optional[str] =
     payload = {"number": remote_jid, "text": text}
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=20)
+        add_webhook_log("evolution_send", {"status_code": r.status_code, "response": r.text[:300]})
         return r.status_code in (200, 201)
     except Exception as e:
-        print(f"[Evolution API] Erro ao enviar mensagem: {e}")
+        add_webhook_log("evolution_error", {"error": str(e)})
         return False
 
 
-def send_zapi_message(phone: str, text: str) -> bool:
+def send_zapi_message(phone: str, text: str, incoming_body: Optional[Dict[str, Any]] = None) -> bool:
     load_env_file()
-    instance_id = os.environ.get("ZAPI_INSTANCE_ID", "")
-    token = os.environ.get("ZAPI_TOKEN", "")
-    client_token = os.environ.get("ZAPI_CLIENT_TOKEN", "")
-    if not (instance_id and token):
+    instance_id = os.environ.get("ZAPI_INSTANCE_ID", "").strip()
+    token = os.environ.get("ZAPI_TOKEN", "").strip()
+    client_token = os.environ.get("ZAPI_CLIENT_TOKEN", "").strip()
+
+    if not instance_id and incoming_body:
+        instance_id = str(
+            incoming_body.get("instanceId")
+            or (incoming_body.get("data") or {}).get("instanceId")
+            or "01A1DD2642E07304B6936C4161D13642"
+        ).strip()
+
+    clean_phone = "".join(ch for ch in str(phone) if ch.isdigit())
+    if not clean_phone:
+        clean_phone = str(phone).split("@")[0]
+
+    if not token:
+        add_webhook_log("zapi_send_skipped", {"reason": "ZAPI_TOKEN vazio", "instance_id": instance_id})
         return False
+
+    # 1. Tenta endpoint padrão Z-API (https://api.z-api.io/instances/{id}/token/{token}/send-text)
     url = f"https://api.z-api.io/instances/{instance_id}/token/{token}/send-text"
-    headers = {"Content-Type": "application/json"}
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
     if client_token:
         headers["Client-Token"] = client_token
-    payload = {"phone": phone, "message": text}
+        headers["Authorization"] = f"Bearer {client_token}"
+    else:
+        headers["Client-Token"] = token
+        headers["Authorization"] = f"Bearer {token}"
+
+    payload = {"phone": clean_phone, "message": text}
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=20)
-        return r.status_code in (200, 201)
+        add_webhook_log("zapi_send_attempt", {
+            "url": url,
+            "phone": clean_phone,
+            "status_code": r.status_code,
+            "response": r.text[:300],
+        })
+        if r.status_code in (200, 201):
+            return True
     except Exception as e:
-        print(f"[Z-API] Erro ao enviar mensagem: {e}")
-        return False
+        add_webhook_log("zapi_send_error", {"error": str(e)})
+
+    return False
 
 
 def send_meta_whatsapp_message(to_phone: str, text: str) -> bool:
@@ -128,8 +203,103 @@ def send_meta_whatsapp_message(to_phone: str, text: str) -> bool:
         r = requests.post(url, json=payload, headers=headers, timeout=20)
         return r.status_code in (200, 201)
     except Exception as e:
-        print(f"[Meta Cloud API] Erro ao enviar mensagem: {e}")
+        print(f"[Meta Cloud API] Erro ao enviar mensagem: {e}", flush=True)
         return False
+
+
+# =====================================================================
+# EXTRATOR UNIVERSAL DE PAYLOAD DE WEBHOOK (Z-API v1, Z-API v2, Evolution)
+# =====================================================================
+
+def extract_whatsapp_message(body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extrai (phone, text, from_me, is_group, image_url) de qualquer formato de payload
+    (Z-API tradicional, Z-API v2 / HubMessage com 'data', ou Evolution API).
+    """
+    data = body.get("data") if isinstance(body.get("data"), dict) else body
+    msg_obj = data.get("message") if isinstance(data.get("message"), dict) else {}
+    key_obj = data.get("key") if isinstance(data.get("key"), dict) else {}
+    sender_obj = data.get("sender") if isinstance(data.get("sender"), dict) else {}
+    contact_obj = data.get("contact") if isinstance(data.get("contact"), dict) else {}
+
+    # Ignora eventos que não são de mensagem recebida
+    event_name = str(body.get("event") or body.get("type") or data.get("event") or "").upper()
+    if event_name and any(
+        ignored in event_name
+        for ignored in ("STATUS", "DELIVERY", "PRESENCE", "CONNECTED", "DISCONNECTED", "ACK", "READ")
+    ) and "RECEIVED" not in event_name:
+        return {"ignored_event": event_name}
+
+    from_me = bool(
+        body.get("fromMe")
+        or data.get("fromMe")
+        or key_obj.get("fromMe")
+        or msg_obj.get("fromMe")
+        or data.get("direction") in ("OUTBOUND", "outbound", "out", "sent")
+    )
+    is_group = bool(
+        body.get("isGroup")
+        or data.get("isGroup")
+        or "@g.us" in str(data.get("phone") or data.get("from") or data.get("chatId") or key_obj.get("remoteJid") or "")
+    )
+
+    phone = ""
+    for p_cand in [
+        body.get("phone"),
+        data.get("phone"),
+        data.get("from"),
+        data.get("sender") if isinstance(data.get("sender"), str) else None,
+        sender_obj.get("phone") or sender_obj.get("id"),
+        contact_obj.get("phone") or contact_obj.get("number"),
+        data.get("chatId"),
+        data.get("remoteJid"),
+        key_obj.get("remoteJid"),
+        msg_obj.get("from"),
+        msg_obj.get("phone"),
+    ]:
+        if p_cand and isinstance(p_cand, (str, int)) and str(p_cand).strip():
+            phone = str(p_cand).strip()
+            break
+
+    # Extrai texto de qualquer campo possível
+    text = ""
+    for candidate in [
+        (body.get("text") or {}).get("message") if isinstance(body.get("text"), dict) else body.get("text"),
+        (data.get("text") or {}).get("message") if isinstance(data.get("text"), dict) else data.get("text"),
+        (data.get("text") or {}).get("body") if isinstance(data.get("text"), dict) else None,
+        (data.get("body") if isinstance(data.get("body"), str) else None),
+        (body.get("body") if isinstance(body.get("body"), str) else None),
+        (data.get("content") if isinstance(data.get("content"), str) else None),
+        ((data.get("content") or {}).get("text") if isinstance(data.get("content"), dict) else None),
+        (msg_obj.get("conversation") if isinstance(msg_obj, dict) else None),
+        ((msg_obj.get("extendedTextMessage") or {}).get("text") if isinstance(msg_obj, dict) else None),
+        (msg_obj.get("text") if isinstance(msg_obj.get("text"), str) else None),
+        ((msg_obj.get("text") or {}).get("body") if isinstance(msg_obj.get("text"), dict) else None),
+        ((msg_obj.get("text") or {}).get("message") if isinstance(msg_obj.get("text"), dict) else None),
+        (msg_obj.get("body") if isinstance(msg_obj.get("body"), str) else None),
+        (msg_obj.get("content") if isinstance(msg_obj.get("content"), str) else None),
+        (body.get("message") if isinstance(body.get("message"), str) else None),
+        (data.get("message") if isinstance(data.get("message"), str) else None),
+        ((body.get("image") or {}).get("caption") if isinstance(body.get("image"), dict) else None),
+        ((data.get("image") or {}).get("caption") if isinstance(data.get("image"), dict) else None),
+    ]:
+        if candidate and isinstance(candidate, str) and candidate.strip():
+            text = candidate.strip()
+            break
+
+    img_url = (
+        ((body.get("image") or {}).get("imageUrl") if isinstance(body.get("image"), dict) else None)
+        or ((data.get("image") or {}).get("imageUrl") if isinstance(data.get("image"), dict) else None)
+    )
+
+    return {
+        "phone": phone,
+        "text": text,
+        "from_me": from_me,
+        "is_group": is_group,
+        "image_url": img_url,
+        "ignored_event": None,
+    }
 
 
 # =====================================================================
@@ -138,6 +308,10 @@ def send_meta_whatsapp_message(to_phone: str, text: str) -> bool:
 
 async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "professor-imune-drogal"})
+
+
+async def api_logs(request: Request) -> JSONResponse:
+    return JSONResponse({"logs": WEBHOOK_LOGS})
 
 
 async def api_status(request: Request) -> JSONResponse:
@@ -152,11 +326,12 @@ async def api_status(request: Request) -> JSONResponse:
         "zapi_configured": zapi_ready,
         "evolution_configured": evo_ready,
         "knowledge_base": kb.stats(),
+        "recent_webhooks": len(WEBHOOK_LOGS),
     })
 
 
 async def api_config(request: Request) -> JSONResponse:
-    data = await request.json()
+    data = await parse_request_json(request)
     for field, env_name in [
         ("api_key", "GEMINI_API_KEY"),
         ("model", "GEMINI_MODEL"),
@@ -179,7 +354,7 @@ async def api_config(request: Request) -> JSONResponse:
 
 
 async def api_chat(request: Request) -> JSONResponse:
-    data = await request.json()
+    data = await parse_request_json(request)
     message = (data.get("message") or "").strip()
     session_id = (data.get("session_id") or "web-farmaceutico").strip()
     api_key = (data.get("api_key") or "").strip() or None
@@ -214,84 +389,62 @@ async def api_chat(request: Request) -> JSONResponse:
 
 
 async def webhook_evolution(request: Request) -> JSONResponse:
-    """Webhook para Evolution API (evento messages.upsert)."""
-    body = await request.json()
-    data = body.get("data") or body
-    instance = body.get("instance")
+    body = await parse_request_json(request)
+    add_webhook_log("evolution_received", {"keys": list(body.keys())})
+    parsed = extract_whatsapp_message(body)
+    if parsed.get("ignored_event") or parsed["from_me"] or parsed["is_group"]:
+        return JSONResponse({"status": "ignored"})
 
-    key_info = data.get("key") or {}
-    if key_info.get("fromMe"):
-        return JSONResponse({"status": "ignored_from_me"})
+    remote_jid = parsed["phone"]
+    text = parsed["text"]
+    if not remote_jid or not text:
+        return JSONResponse({"status": "empty"})
 
-    remote_jid = key_info.get("remoteJid") or data.get("from") or ""
-    if not remote_jid or "@g.us" in remote_jid:
-        return JSONResponse({"status": "ignored_group_or_empty"})
-
-    msg_obj = data.get("message") or {}
-    text = (
-        msg_obj.get("conversation")
-        or (msg_obj.get("extendedTextMessage") or {}).get("text")
-        or (msg_obj.get("imageMessage") or {}).get("caption")
-        or data.get("body")
-        or ""
-    ).strip()
-
-    image_bytes: Optional[bytes] = None
-    b64_media = data.get("base64") or (msg_obj.get("imageMessage") or {}).get("jpegThumbnail")
-    if b64_media and isinstance(b64_media, str):
-        try:
-            image_bytes = base64.b64decode(b64_media)
-        except Exception:
-            image_bytes = None
-
-    if not text and not image_bytes:
-        return JSONResponse({"status": "empty_message"})
-
-    reply, _ = agent.chat(
-        user_message=text or "Analise esta imagem enviada pelo farmacêutico na sala de vacinas.",
-        session_id=f"evo:{remote_jid}",
-        image_bytes=image_bytes,
-    )
-    sent = send_evolution_message(remote_jid=remote_jid, text=reply, instance=instance)
+    reply, _ = agent.chat(user_message=text, session_id=f"evo:{remote_jid}")
+    sent = send_evolution_message(remote_jid=remote_jid, text=reply, instance=body.get("instance"))
     return JSONResponse({"status": "processed", "sent_to_evolution": sent, "reply": reply})
 
 
 async def webhook_zapi(request: Request) -> JSONResponse:
-    """Webhook para Z-API (Ao receber mensagem de texto ou imagem)."""
-    body = await request.json()
-    if body.get("fromMe") or body.get("isGroup"):
-        return JSONResponse({"status": "ignored"})
+    """Webhook Universal para Z-API (suporta GZIP \x1f\x8b + formatos v1, v2 e eventos aninhados)."""
+    try:
+        body = await parse_request_json(request)
+    except Exception as e:
+        add_webhook_log("zapi_parse_error", {"error": str(e)})
+        return JSONResponse({"status": "invalid_json", "error": str(e)}, status_code=400)
 
-    phone = str(body.get("phone") or "").strip()
-    if not phone:
-        return JSONResponse({"status": "empty_phone"})
+    parsed = extract_whatsapp_message(body)
+    add_webhook_log("zapi_received", {
+        "parsed_phone": parsed.get("phone"),
+        "parsed_text": (parsed.get("text") or "")[:80],
+        "from_me": parsed.get("from_me"),
+        "is_group": parsed.get("is_group"),
+        "ignored_event": parsed.get("ignored_event"),
+        "raw_preview": json.dumps(body, ensure_ascii=False)[:400],
+    })
 
-    text = (
-        (body.get("text") or {}).get("message")
-        or (body.get("image") or {}).get("caption")
-        or body.get("message")
-        or ""
-    ).strip()
+    if parsed.get("ignored_event"):
+        return JSONResponse({"status": "ignored_event", "event": parsed["ignored_event"]})
+    if parsed["from_me"] or parsed["is_group"]:
+        return JSONResponse({"status": "ignored_from_me_or_group"})
 
-    image_bytes: Optional[bytes] = None
-    img_url = (body.get("image") or {}).get("imageUrl")
-    if img_url:
-        image_bytes = download_image_from_url(img_url)
+    phone = parsed["phone"]
+    text = parsed["text"]
+    image_bytes = download_image_from_url(parsed.get("image_url") or "")
 
-    if not text and not image_bytes:
-        return JSONResponse({"status": "empty_content"})
+    if not phone or (not text and not image_bytes):
+        return JSONResponse({"status": "empty_phone_or_text", "parsed": parsed})
 
     reply, _ = agent.chat(
-        user_message=text or "Analise esta foto enviada pelo farmacêutico na sala de vacinas.",
+        user_message=text or "Analise esta imagem enviada pelo farmacêutico na sala de vacinas.",
         session_id=f"zapi:{phone}",
         image_bytes=image_bytes,
     )
-    sent = send_zapi_message(phone=phone, text=reply)
+    sent = send_zapi_message(phone=phone, text=reply, incoming_body=body)
     return JSONResponse({"status": "processed", "sent_to_zapi": sent, "reply": reply})
 
 
 async def webhook_meta(request: Request) -> Response:
-    """Webhook para WhatsApp Cloud API Oficial da Meta (GET para verificação + POST para mensagens)."""
     if request.method == "GET":
         load_env_file()
         verify_token = os.environ.get("WHATSAPP_VERIFY_TOKEN", "professor_imune_drogal")
@@ -302,7 +455,7 @@ async def webhook_meta(request: Request) -> Response:
             return PlainTextResponse(challenge)
         return PlainTextResponse("Verification token mismatch", status_code=403)
 
-    body = await request.json()
+    body = await parse_request_json(request)
     try:
         entries = body.get("entry") or []
         for entry in entries:
@@ -315,13 +468,12 @@ async def webhook_meta(request: Request) -> Response:
                         reply, _ = agent.chat(user_message=text, session_id=f"meta:{from_phone}")
                         send_meta_whatsapp_message(to_phone=from_phone, text=reply)
     except Exception as e:
-        print(f"[Webhook Meta] Erro: {e}")
+        print(f"[Webhook Meta] Erro: {e}", flush=True)
 
     return JSONResponse({"status": "ok"})
 
 
 async def webhook_twilio(request: Request) -> Response:
-    """Webhook para Twilio WhatsApp (form-urlencoded)."""
     form = await request.form()
     from_number = str(form.get("From") or "twilio-user")
     body_text = str(form.get("Body") or "").strip()
@@ -497,8 +649,8 @@ SIMULATOR_HTML = """<!DOCTYPE html>
         <code id="evoWebhookUrl">POST .../webhook/evolution</code>
       </div>
       <div class="form-group">
-        <label>Z-API Instance ID (Opcional se usar Z-API)</label>
-        <input type="text" id="zapiInstanceInput" placeholder="Ex: 3C8F9A..." />
+        <label>Z-API Instance ID</label>
+        <input type="text" id="zapiInstanceInput" placeholder="Ex: 01A1DD2642E07304B6936C4161D13642" />
       </div>
       <div class="form-group">
         <label>Z-API Token</label>
@@ -698,14 +850,19 @@ Como posso apoiar você hoje na sala de vacinação?</div>
 """
 
 
-async def index_page(request: Request) -> HTMLResponse:
+async def index_or_webhook(request: Request) -> Response:
+    """Se a Z-API disparar POST na raiz (/), processa como webhook automaticamente!"""
+    if request.method == "POST":
+        return await webhook_zapi(request)
     return HTMLResponse(SIMULATOR_HTML)
 
 
 routes = [
-    Route("/", index_page, methods=["GET"]),
+    Route("/", index_or_webhook, methods=["GET", "POST"]),
+    Route("/webhook", webhook_zapi, methods=["POST"]),
     Route("/health", health_check, methods=["GET"]),
     Route("/api/status", api_status, methods=["GET"]),
+    Route("/api/logs", api_logs, methods=["GET"]),
     Route("/api/config", api_config, methods=["POST"]),
     Route("/api/chat", api_chat, methods=["POST"]),
     Route("/webhook/evolution", webhook_evolution, methods=["POST"]),
@@ -719,12 +876,10 @@ app = Starlette(debug=False, routes=routes)
 if __name__ == "__main__":
     load_env_file()
     port = int(os.environ.get("PORT", "8000"))
-    print("=" * 72)
-    print("💉 PROFESSOR IMUNE — ESPECIALISTA VIRTUAL EM VACINAÇÃO (REDE DROGAL)")
-    print(f"📚 Base carregada: {kb.stats()}")
-    print(f"🌐 Simulador Web & Painel: http://localhost:{port}")
-    print(f"📱 Webhook Z-API         : http://localhost:{port}/webhook/zapi")
-    print(f"📱 Webhook Evolution API : http://localhost:{port}/webhook/evolution")
-    print(f"📱 Webhook Meta Cloud API: http://localhost:{port}/webhook/meta")
-    print("=" * 72)
+    print("=" * 72, flush=True)
+    print("💉 PROFESSOR IMUNE — ESPECIALISTA VIRTUAL EM VACINAÇÃO (REDE DROGAL)", flush=True)
+    print(f"📚 Base carregada: {kb.stats()}", flush=True)
+    print(f"🌐 Simulador Web & Painel: http://localhost:{port}", flush=True)
+    print(f"📱 Webhook Z-API         : http://localhost:{port}/webhook/zapi", flush=True)
+    print("=" * 72, flush=True)
     uvicorn.run(app, host="0.0.0.0", port=port)
