@@ -303,8 +303,38 @@ class ProfessorImuneAgent:
             ).replace(",", ".")
             return (msg_tokens, [])
 
+        # Se a mensagem contiver apenas emojis/símbolos (ex: reação "👏🏻", "👍", "🙏"), encerra a sessão em silêncio (sem responder)
+        norm_clean = normalize_text(user_message).strip()
+        if not image_bytes and not norm_clean:
+            self.reset_session(session_id)
+            return ("", [])
+
+        # Se for uma mensagem curta de encerramento/agradecimento, reseta a sessão na hora (0 tokens) e não faz novas perguntas
+        closing_phrases = {
+            "obrigado", "obrigada", "obg", "valeu", "vlw", "ok", "okay", "ta bom",
+            "tudo bem", "perfeito", "show", "certo", "combinado", "encerrar",
+            "finalizar", "tchau", "ate mais", "era so isso", "so isso",
+            "ok obrigado", "ok obrigada", "perfeito obrigado", "certo obrigado",
+            "muito obrigado", "muito obrigada",
+        }
+        if not image_bytes and norm_clean in closing_phrases:
+            self.reset_session(session_id)
+            return (
+                "✅ Atendimento encerrado e contexto reiniciado! Quando tiver o próximo caso na sala de vacinas, é só me chamar.",
+                [],
+            )
+
+        # Auto-expiração por inatividade: se passaram mais de 15 minutos (900s) desde a última interação, reseta o contexto antigo
+        session_Idle_timeout = int(os.environ.get("SESSION_IDLE_TIMEOUT_SECONDS", "900"))
+        raw_history = self.sessions.get(session_id, [])
+        if raw_history:
+            last_ts = float(raw_history[-1].get("ts") or 0)
+            if last_ts > 0 and (time.time() - last_ts) > session_Idle_timeout:
+                self.reset_session(session_id)
+                raw_history = []
+
         # Mantém apenas os últimos 4 turnos para economizar ~40% de tokens de entrada sem perder o fio da meada
-        history = self.sessions.get(session_id, [])[-4:]
+        history = raw_history[-4:]
 
         # Combina as últimas mensagens do usuário na query de busca para preservar o perfil do paciente na conversa
         search_query = user_message
@@ -362,8 +392,9 @@ class ProfessorImuneAgent:
 
         reply = self._format_for_whatsapp(reply)
 
-        history.append({"role": "user", "text": user_message or "[Imagem enviada]"})
-        history.append({"role": "model", "text": reply})
+        now_ts = time.time()
+        history.append({"role": "user", "text": user_message or "[Imagem enviada]", "ts": now_ts})
+        history.append({"role": "model", "text": reply, "ts": now_ts})
         self.sessions[session_id] = history[-6:]
         self._save_sessions()
 
