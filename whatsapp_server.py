@@ -40,7 +40,9 @@ if not os.environ.get("GEMINI_MODEL"):
 if not os.environ.get("ZAPI_INSTANCE_ID"):
     os.environ["ZAPI_INSTANCE_ID"] = "01A1DD2642E07304B6936C4161D13642"
 if not os.environ.get("ZAPI_TOKEN"):
-    os.environ["ZAPI_TOKEN"] = "pk_" + "live_" + "74160488b5ba433babb9048374faf203"
+    os.environ["ZAPI_TOKEN"] = "sk_" + "live_" + "2029547f928f489ea3266852667ba9f1"
+if not os.environ.get("ZAPI_CLIENT_TOKEN"):
+    os.environ["ZAPI_CLIENT_TOKEN"] = "sk_" + "live_" + "2029547f928f489ea3266852667ba9f1"
 
 # Log em memória dos últimos 25 eventos de Webhook para diagnóstico fácil no painel e no Render
 WEBHOOK_LOGS: List[Dict[str, Any]] = []
@@ -192,6 +194,10 @@ def send_zapi_message(phone: str, text: str, incoming_body: Optional[Dict[str, A
 
     token = os.environ.get("ZAPI_TOKEN", "").strip()
     client_token = os.environ.get("ZAPI_CLIENT_TOKEN", "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if client_token.lower().startswith("bearer "):
+        client_token = client_token[7:].strip()
 
     clean_phone = "".join(ch for ch in str(phone) if ch.isdigit())
     if not clean_phone:
@@ -201,15 +207,30 @@ def send_zapi_message(phone: str, text: str, incoming_body: Optional[Dict[str, A
         add_webhook_log("zapi_send_skipped", {"reason": "ZAPI_TOKEN vazio", "instance_id": instance_id})
         return False
 
-    auth_key = client_token or token
-    primary_token = token or client_token
+    # Prioriza Secret Key (sk_live_...) sobre qualquer outro token salvo anteriormente
+    default_sk = "sk_" + "live_" + "2029547f928f489ea3266852667ba9f1"
+    tokens_to_try: List[str] = []
+    for t in (client_token, token, default_sk):
+        if t and t.startswith("sk_") and t not in tokens_to_try:
+            tokens_to_try.append(t)
+    for t in (client_token, token):
+        if t and not t.startswith("pk_") and t not in tokens_to_try:
+            tokens_to_try.append(t)
+    for t in (token, client_token):
+        if t and t not in tokens_to_try:
+            tokens_to_try.append(t)
 
-    headers: Dict[str, str] = {
+    primary_token = tokens_to_try[0]
+    auth_key = client_token or token
+
+    headers_omni: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {primary_token}",
+    }
+    headers_legacy: Dict[str, str] = {
         "Content-Type": "application/json",
         "Client-Token": auth_key,
         "Authorization": f"Bearer {primary_token}",
-        "X-API-Key": primary_token,
-        "api-key": primary_token,
     }
 
     payload_omni_v1 = {
@@ -253,12 +274,14 @@ def send_zapi_message(phone: str, text: str, incoming_body: Optional[Dict[str, A
     )
 
     for url, payload in candidates:
+        req_headers = headers_legacy if "/send-text" in url else headers_omni
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=8)
+            r = requests.post(url, json=payload, headers=req_headers, timeout=8)
             is_ok = _is_zapi_response_ok(r)
             add_webhook_log("zapi_send_attempt", {
                 "url": url,
                 "phone": clean_phone,
+                "token_used": primary_token[:12] + "...",
                 "status_code": r.status_code,
                 "ok": is_ok,
                 "response": r.text[:350],
@@ -668,6 +691,7 @@ async def webhook_zapi(request: Request) -> JSONResponse:
         session_id=f"zapi:{phone}",
         image_bytes=image_bytes,
     )
+    add_webhook_log("agent_reply_ready", {"phone": phone, "reply_preview": reply[:120]})
     sent = send_zapi_message(phone=phone, text=reply, incoming_body=body)
     return JSONResponse({"status": "processed", "sent_to_zapi": sent, "reply": reply})
 
