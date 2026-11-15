@@ -44,6 +44,7 @@ if not os.environ.get("ZAPI_TOKEN"):
 
 # Log em memória dos últimos 25 eventos de Webhook para diagnóstico fácil no painel e no Render
 WEBHOOK_LOGS: List[Dict[str, Any]] = []
+SEEN_MESSAGE_IDS: List[str] = []
 
 
 def add_webhook_log(event_type: str, details: Dict[str, Any]) -> None:
@@ -144,6 +145,26 @@ def send_evolution_message(remote_jid: str, text: str, instance: Optional[str] =
         return False
 
 
+def _is_zapi_response_ok(r: requests.Response) -> bool:
+    """Verifica se a resposta HTTP realmente enviou a mensagem (evita falso 200 com {'error': 'NOT_FOUND'})."""
+    if r.status_code not in (200, 201, 202):
+        return False
+    try:
+        data = r.json()
+        if isinstance(data, dict):
+            if data.get("error") or data.get("errors"):
+                return False
+            status_val = str(data.get("status") or "").upper()
+            if status_val in ("ERROR", "NOT_FOUND", "UNAUTHORIZED", "FORBIDDEN", "BAD_REQUEST", "FAILED"):
+                return False
+            msg_val = str(data.get("message") or "")
+            if "Unable to find matching target resource method" in msg_val or "not found" in msg_val.lower():
+                return False
+    except Exception:
+        pass
+    return True
+
+
 def send_zapi_message(phone: str, text: str, incoming_body: Optional[Dict[str, Any]] = None) -> bool:
     load_env_file()
     msg_envelope = (
@@ -160,6 +181,15 @@ def send_zapi_message(phone: str, text: str, incoming_body: Optional[Dict[str, A
             or "01A1DD2642E07304B6936C4161D13642"
         ).strip()
     )
+
+    # Extrai também o instance_id interno da Z-API se vier em contents[0].internal_information.instance_id
+    internal_instance_id = ""
+    contents_list = msg_envelope.get("contents")
+    if isinstance(contents_list, list) and contents_list:
+        first_c = contents_list[0] if isinstance(contents_list[0], dict) else {}
+        internal_info = first_c.get("internal_information") if isinstance(first_c.get("internal_information"), dict) else {}
+        internal_instance_id = str(internal_info.get("instance_id") or "").strip()
+
     token = os.environ.get("ZAPI_TOKEN", "").strip()
     client_token = os.environ.get("ZAPI_CLIENT_TOKEN", "").strip()
 
@@ -182,49 +212,58 @@ def send_zapi_message(phone: str, text: str, incoming_body: Optional[Dict[str, A
         "api-key": primary_token,
     }
 
-    is_conway = bool(
-        msg_envelope.get("created_by") == "CONWAY"
-        or "hubmessage" in str(msg_envelope.get("tenant_owner") or "").lower()
-        or str(primary_token).startswith(("pk_", "sk_"))
-    )
-
-    payload_classic = {"phone": clean_phone, "message": text}
-    payload_conway_v1 = {
-        "recipient": {"identifier": clean_phone, "phone": clean_phone},
-        "content": {"type": "TEXT", "text": text, "message": text, "body": {"message": text}},
-        "contents": [{"@class": ".TextContent", "type": "TEXT", "message": text, "text": text}],
-        "phone": clean_phone,
-        "message": text,
+    payload_omni_v1 = {
+        "recipient": {"identifier": clean_phone},
+        "content": {
+            "type": "TEXT",
+            "body": {"message": text},
+        },
     }
+    payload_conway_contents = {
+        "recipient": {"identifier": clean_phone},
+        "contents": [
+            {
+                "@class": ".TextContent",
+                "type": "TEXT",
+                "message": text,
+            }
+        ],
+    }
+    payload_classic = {"phone": clean_phone, "message": text}
 
-    candidates = []
-    if is_conway:
-        candidates.extend([
-            (f"https://api.z-api.io/instances/{instance_id}/token/{primary_token}/send-text", payload_classic),
-            (f"https://api.z-api.io/instances/{instance_id}/send-text", payload_classic),
-            (f"https://api.z-api.io/instances/{instance_id}/messages", payload_conway_v1),
-            (f"https://api.hubmessage.io/v1/channels/{instance_id}/messages", payload_conway_v1),
-            (f"https://api.hubmessage.io/instances/{instance_id}/token/{primary_token}/send-text", payload_classic),
-            (f"https://api.hubmessage.io/instances/{instance_id}/messages", payload_conway_v1),
-            (f"https://api.hubmessage.io/instances/{instance_id}/send-text", payload_classic),
-        ])
-    else:
-        candidates.extend([
-            (f"https://api.z-api.io/instances/{instance_id}/token/{primary_token}/send-text", payload_classic),
-            (f"https://api.hubmessage.io/v1/channels/{instance_id}/messages", payload_conway_v1),
-            (f"https://api.z-api.io/instances/{instance_id}/messages", payload_conway_v1),
-        ])
+    candidates = [
+        # 1. Endpoints Oficiais Z-API Omni / HubMessage (/v1/channels/{channelId}/messages e /instances/{id}/messages)
+        (f"https://api.omni.z-api.io/v1/channels/{instance_id}/messages", payload_omni_v1),
+        (f"https://api.hubmessage.io/v1/channels/{instance_id}/messages", payload_omni_v1),
+        (f"https://api.z-api.io/instances/{instance_id}/messages", payload_omni_v1),
+        (f"https://api.z-api.io/instances/{instance_id}/messages", payload_conway_contents),
+        (f"https://api.z-api.io/instances/{instance_id}/messages", payload_classic),
+        (f"https://api.omni.z-api.io/instances/{instance_id}/messages", payload_omni_v1),
+        (f"https://api.hubmessage.io/instances/{instance_id}/messages", payload_omni_v1),
+        (f"https://api.z-api.io/v1/channels/{instance_id}/messages", payload_omni_v1),
+    ]
+
+    # 2. Se houver instance_id interno (ex: 3FC2CEA69B79F08F2999CE9821AFC667), tenta na Z-API Clássica
+    if internal_instance_id:
+        candidates.append(
+            (f"https://api.z-api.io/instances/{internal_instance_id}/token/{primary_token}/send-text", payload_classic)
+        )
+    candidates.append(
+        (f"https://api.z-api.io/instances/{instance_id}/token/{primary_token}/send-text", payload_classic)
+    )
 
     for url, payload in candidates:
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=12)
+            r = requests.post(url, json=payload, headers=headers, timeout=8)
+            is_ok = _is_zapi_response_ok(r)
             add_webhook_log("zapi_send_attempt", {
                 "url": url,
                 "phone": clean_phone,
                 "status_code": r.status_code,
+                "ok": is_ok,
                 "response": r.text[:350],
             })
-            if r.status_code in (200, 201, 202):
+            if is_ok:
                 return True
         except Exception as e:
             add_webhook_log("zapi_send_error", {"url": url, "error": str(e)})
@@ -566,6 +605,13 @@ async def api_chat(request: Request) -> JSONResponse:
 async def webhook_evolution(request: Request) -> JSONResponse:
     body = await parse_request_json(request)
     add_webhook_log("evolution_received", {"keys": list(body.keys())})
+    msg_id = str(((body.get("message") or {}).get("_id") if isinstance(body.get("message"), dict) else None) or body.get("messageId") or "").strip()
+    if msg_id:
+        if msg_id in SEEN_MESSAGE_IDS:
+            return JSONResponse({"status": "duplicate_ignored", "id": msg_id})
+        SEEN_MESSAGE_IDS.insert(0, msg_id)
+        del SEEN_MESSAGE_IDS[100:]
+
     parsed = extract_whatsapp_message(body)
     if parsed.get("ignored_event") or parsed["from_me"] or parsed["is_group"]:
         return JSONResponse({"status": "ignored"})
@@ -587,6 +633,13 @@ async def webhook_zapi(request: Request) -> JSONResponse:
     except Exception as e:
         add_webhook_log("zapi_parse_error", {"error": str(e)})
         return JSONResponse({"status": "invalid_json", "error": str(e)}, status_code=400)
+
+    msg_id = str(((body.get("message") or {}).get("_id") if isinstance(body.get("message"), dict) else None) or body.get("messageId") or "").strip()
+    if msg_id:
+        if msg_id in SEEN_MESSAGE_IDS:
+            return JSONResponse({"status": "duplicate_ignored", "id": msg_id})
+        SEEN_MESSAGE_IDS.insert(0, msg_id)
+        del SEEN_MESSAGE_IDS[100:]
 
     parsed = extract_whatsapp_message(body)
     add_webhook_log("zapi_received", {
